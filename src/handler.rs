@@ -2,10 +2,10 @@ use crate::pow::POW;
 use anyhow::{anyhow, Result};
 use fs_extra;
 use log::{error, info, warn};
-use std::env;
+use std::{env, fs, io};
 use std::fs::create_dir;
 use std::net::SocketAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -67,7 +67,11 @@ impl Handler {
                             client_lock.addr, disconnect_error
                         );
                     }
-                    client_lock.socket.shutdown().await.unwrap();
+                    if !e.to_string().contains("Broken pipe") && !e.to_string().contains("closes the conne"){
+                            if let Err(_) = client_lock.socket.shutdown().await {
+                            eprint!("Failed to shutdown");
+                        };
+                    }
                 }
             });
         }
@@ -133,6 +137,8 @@ impl Handler {
                 },
                 Ok(Err(e)) => {
                     // Client closes the connection
+                    eprint!("here");
+                    
                     return Err(e.into());
                 }
                 Err(_) => {
@@ -143,11 +149,11 @@ impl Handler {
         }
     }
     async fn handle_disconnect(&self, client: &Client) -> Result<()> {
+        self.remove_service(client).await?;
         if let Some(temp_dir) = &client.temp_dir {
             fs_extra::remove_items(&vec![temp_dir])?;
             warn!("removed directory {}", temp_dir);
         }
-        self.remove_service(client).await?;
         Ok(())
     }
     async fn handle_pass_pow(&self, client: &Arc<Mutex<Client>>) -> Result<()> {
@@ -183,23 +189,44 @@ impl Handler {
             Err(e) => Err(e.into()),
         }
     }
+    fn copy_recursively(source: &Path, target: &Path) -> io::Result<()> {
+        if !source.exists() {
+            return Err(io::Error::new(io::ErrorKind::NotFound, "Source directory does not exist"));
+        }
+    
+        if !target.exists() {
+            fs::create_dir_all(&target)?;
+        }
+    
+        for entry in fs::read_dir(source)? {
+            let entry = entry?;
+            let source_path = entry.path();
+            let file_name = entry.file_name();
+    
+            let target_path = target.join(file_name);
+    
+            if source_path.is_dir() {
+                Self::copy_recursively(&source_path, &target_path)?;
+            } else {
+                fs::copy(&source_path, &target_path)?;
+            }
+        }
+    
+        Ok(())
+    }
     async fn start_service(&self, client: &mut Client) -> Result<String> {
         // 1. Create a temporary directory
         // /tmp/pow-compose-[uuid]
         let service_name = format!("pow-compose-{}", Uuid::new_v4().to_string());
         client.service_name = Some(service_name.clone());
-        let mut temp_dir_path = Path::new(env::temp_dir().as_path()).join(&service_name);
+        let temp_dir_path = Path::new(env::temp_dir().as_path()).join(&service_name);
         create_dir(&temp_dir_path)?;
         // dbg!(&temp_dir_path);
         client.temp_dir = Some(temp_dir_path.clone().to_string_lossy().to_string());
-        // 2. Copy the compose file to the temporary directory
-        fs_extra::copy_items(
-            &vec![&self.compose_dir],
-            &temp_dir_path,
-            &fs_extra::dir::CopyOptions::new(),
-        )?;
+        let pa: PathBuf = self.compose_dir.clone().into();
+        let _ = Self::copy_recursively(pa.as_path(), &temp_dir_path);
+
         // now we have a temporary compose directory /tmp/pow-compose-[uuid]/[compose_dir]
-        temp_dir_path = temp_dir_path.join(&self.compose_dir);
         // 3. find available port
         let port: String;
         match TcpListener::bind("127.0.0.1:0")
@@ -210,7 +237,6 @@ impl Handler {
             Some(p) => port = p.to_string(),
             None => return Err(anyhow!("No available port")),
         };
-        info!("Open service on port {port}");
         // dbg!(&port);
         // 4. replace port in docker-compose.tpl and write to docker-compose.yml
         let compose_file_path = temp_dir_path.join("docker-compose.tpl");
@@ -218,22 +244,23 @@ impl Handler {
         compose_file = compose_file.replace("{{port}}", &port);
         std::fs::write(temp_dir_path.join("docker-compose.yml"), compose_file)?;
         // 5. start the service
-        Command::new("docker")
-            .args(&["compose", "-p", &service_name, "up", "-d"])
+        Command::new("docker-compose")
+            .args(&["-p", &service_name, "up", "-d"])
             .current_dir(&temp_dir_path)
             .output()
             .await?;
-        // dbg!(output);
+        info!("Open service on port {port}");
         Ok(port)
     }
     async fn remove_service(&self, client: &Client) -> Result<()> {
-        if let Some(service_name) = &client.service_name {
-            Command::new("docker")
-                .args(&["compose", "-p", &service_name, "down"])
-                .output()
-                .await?;
-            // dbg!(output);
-        }
+        let service_name = &client.service_name.clone().unwrap();
+        let temp_dir_path = &client.temp_dir.clone().unwrap();
+        Command::new("docker-compose")
+            .args(&["-p", &service_name, "down"])
+            .current_dir(temp_dir_path)
+            .output()
+            .await?;
+        // dbg!(output);
         Ok(())
     }
 }
