@@ -137,8 +137,6 @@ impl Handler {
                 },
                 Ok(Err(e)) => {
                     // Client closes the connection
-                    eprint!("here");
-                    
                     return Err(e.into());
                 }
                 Err(_) => {
