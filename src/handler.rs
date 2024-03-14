@@ -165,12 +165,12 @@ impl Handler {
                     match client_lock.socket.read(&mut buf).await {
                         Ok(n) => {
                             if n == 0 {
-                                println!("ClientClose");
+                                // println!("ClientClose");
                                 break HandlerError::ClientClose;
                             }
                         }
                         Err(_) => {
-                            println!("ConnectionError");
+                            // println!("ConnectionError");
                             break HandlerError::ConnectionError;
                         }
                     }
